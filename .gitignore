@@ -1,0 +1,4 @@
+__pycache__/
+*.pyc
+# written by make_test_audio.ps1
+test-audio/
