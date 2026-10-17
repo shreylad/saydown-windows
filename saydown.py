@@ -54,7 +54,8 @@ KEY_NAMES = F_KEYS | {0x20: "Space", 0x0D: "Enter", 0x09: "Tab", 0x08: "Backspac
                       0x2D: "Insert", 0x24: "Home", 0x23: "End", 0x21: "Page Up", 0x22: "Page Down",
                       0x25: "Left", 0x26: "Up", 0x27: "Right", 0x28: "Down", 0xC0: "`", 0xBD: "-", 0xBB: "=",
                       0xDB: "[", 0xDD: "]", 0xDC: "\\", 0xBA: ";", 0xDE: "'", 0xBC: ",", 0xBE: ".", 0xBF: "/"}
-DEFAULT_HOTKEY = {"vk": 0xA5, "mods": 0, "label": "Right Alt"}
+RIGHT_ALT = {"vk": 0xA5, "mods": 0, "label": "Right Alt"}
+RIGHT_CTRL = {"vk": 0xA3, "mods": 0, "label": "Right Ctrl"}  # the default where right Alt is AltGr; see default_hotkey()
 ESC = 0x1B
 capture = {"until": 0.0, "error": ""}  # set by the settings page while it waits for you to press a new shortcut
 
@@ -79,7 +80,7 @@ DEFAULTS = {
     "idle_alpha": 0.3,  # how visible the pill is when idle (0.1 = nearly invisible, 1 = solid)
     "pill_position": "bottom",
     "save_history": True,
-    "hotkey": DEFAULT_HOTKEY,
+    "hotkey": None,  # None: default_hotkey(), which depends on the keyboard layout
     "microphone": "",  # an input device name, or "" for the Windows default
     "language": "auto",
     "voice_commands": False,  # "make that shorter" / "undo that" right after a dictation edits it in place
@@ -93,9 +94,10 @@ _cached = [None, None]  # settings file mtime, parsed settings
 def settings():
     """Current settings. Called on every key event, so the file is re-read only when it changes."""
     try:
-        mtime = SETTINGS.stat().st_mtime
-        if _cached[0] != mtime:
-            _cached[:] = [mtime, DEFAULTS | json.loads(SETTINGS.read_text(encoding="utf-8"))]
+        stat = SETTINGS.stat()
+        stamp = stat.st_mtime_ns, stat.st_size
+        if _cached[0] != stamp:
+            _cached[:] = [stamp, DEFAULTS | json.loads(SETTINGS.read_text(encoding="utf-8"))]
         return _cached[1]
     except (OSError, ValueError, TypeError):
         return DEFAULTS
@@ -103,13 +105,28 @@ def settings():
 
 def save_settings(new):
     SETTINGS.write_text(json.dumps(new, indent=2) + "\n", encoding="utf-8")
+    _cached[:] = [None, None]  # two saves can share a timestamp; never serve the older one from the cache
 
 
 def hotkey():
     key = settings()["hotkey"]
     valid = isinstance(key, dict) and all(isinstance(key.get(name), kind) for name, kind in
                                           (("vk", int), ("mods", int), ("label", str)))
-    return key if valid else DEFAULT_HOTKEY
+    return key if valid else default_hotkey()
+
+
+_default = []
+
+
+def default_hotkey():
+    """Right Alt, like right Option on the Mac; but right Ctrl when any installed keyboard layout uses right Alt as
+    AltGr, the key held to type @, € or é on German, French, Spanish, Polish and many other keyboards."""
+    if not _default:
+        try:
+            _default.append(RIGHT_CTRL if altgr_keyboard() else RIGHT_ALT)
+        except OSError:
+            _default.append(RIGHT_ALT)
+    return _default[0]
 
 
 def modifier_only(key):
@@ -239,6 +256,9 @@ user32.GetForegroundWindow.restype = wintypes.HWND
 user32.GetWindowLongPtrW.restype = user32.SetWindowLongPtrW.restype = ctypes.c_ssize_t
 user32.GetWindowLongPtrW.argtypes = [wintypes.HWND, ctypes.c_int]
 user32.SetWindowLongPtrW.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_ssize_t]
+user32.VkKeyScanExW.argtypes = [wintypes.WCHAR, wintypes.HKL]
+user32.VkKeyScanExW.restype = ctypes.c_short
+user32.GetKeyboardLayoutList.argtypes = [ctypes.c_int, ctypes.POINTER(wintypes.HKL)]
 user32.GetParent.argtypes = [wintypes.HWND]
 user32.GetParent.restype = wintypes.HWND
 kernel32.GetModuleHandleW.restype = wintypes.HMODULE  # a 64-bit handle; the default int would cut it in half
@@ -328,6 +348,23 @@ def deliver(text):
     paste(text)
     status["delivery"] = ""
     return True
+
+
+def uses_altgr(layout):
+    """True when the keyboard layout types any character with Ctrl+Alt, which is what AltGr sends."""
+    for code in range(0x21, 0x2FF):
+        found = user32.VkKeyScanExW(chr(code), layout)
+        if found != -1 and (found >> 8) & 6 == 6:  # the high byte holds the modifiers: 2 is Ctrl, 4 is Alt
+            return True
+    return False
+
+
+def altgr_keyboard():
+    """True when any keyboard layout installed in Windows uses right Alt as AltGr."""
+    count = user32.GetKeyboardLayoutList(0, None)
+    layouts = (wintypes.HKL * count)()
+    user32.GetKeyboardLayoutList(count, layouts)
+    return any(uses_altgr(layout) for layout in layouts)
 
 
 def microphone_allowed():

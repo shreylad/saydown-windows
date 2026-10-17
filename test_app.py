@@ -19,6 +19,7 @@ def keyboard(**hotkey):
     else:
         a.SETTINGS.unlink(missing_ok=True)
     a._cached[:] = [None, None]
+    a._default[:] = [a.RIGHT_ALT]  # the US-layout default, whatever keyboard the machine running the tests has
     return board
 
 
@@ -44,6 +45,29 @@ class App(unittest.TestCase):
         keys = [(i.ki.wVk, bool(i.ki.dwFlags & a.KEYUP)) for i in send.call_args.args]
         self.assertEqual(keys, [(a.MASK_KEY, False), (a.MASK_KEY, True), (0xA5, True)])
         self.assertTrue(all(i.ki.dwExtraInfo == a.OURS for i in send.call_args.args))
+
+    def test_default_shortcut_is_right_ctrl_where_right_alt_is_altgr(self):
+        a.SETTINGS.unlink(missing_ok=True)
+        a._cached[:] = [None, None]
+        for altgr, label in ((False, "Right Alt"), (True, "Right Ctrl")):
+            a._default.clear()
+            with patch.object(a, "altgr_keyboard", return_value=altgr):
+                self.assertEqual(a.hotkey()["label"], label)
+        a._default.clear()
+        with patch.object(a, "altgr_keyboard", side_effect=OSError("no layouts")):
+            self.assertEqual(a.hotkey()["label"], "Right Alt")
+        a._default.clear()
+        with patch.object(a, "altgr_keyboard", return_value=True):  # a chosen shortcut is kept on any layout
+            a.save_settings(dict(a.DEFAULTS) | {"hotkey": a.RIGHT_ALT})
+            self.assertEqual(a.hotkey()["label"], "Right Alt")
+        a._default.clear()
+
+    def test_altgr_detection_reads_ctrl_alt_from_the_layout(self):
+        us = {ord("@"): 0x0132}  # Shift+2
+        german = {ord("@"): 0x0651}  # Ctrl+Alt+Q: AltGr+Q
+        for table, expected in ((us, False), (german, True)):
+            with patch.object(a.user32, "VkKeyScanExW", side_effect=lambda ch, _, t=table: t.get(ord(ch), -1)):
+                self.assertEqual(a.uses_altgr(None), expected)
 
     def test_other_keys_are_left_alone(self):
         board = keyboard()

@@ -8,7 +8,7 @@ A private dictation app for Windows. Your speech is transcribed by Whisper and t
 
 ## What it does
 
-- **Push to talk.** Hold the right Alt key, speak, release.
+- **Push to talk.** Hold the right Alt key, speak, release. (Right Ctrl on keyboards that use right Alt as AltGr; see [Usage](#usage).)
 - **Hands-free.** Double-tap right Alt to keep listening, and tap once more to stop.
 - **Or click to talk.** A small, mostly see-through pill sits above the taskbar. Click it to start and click again to stop. Clicking it never takes the focus from the app you are typing in.
 - **Cleans up speech.** Filler sounds (um, uh, hmm) and stutters are dropped. Spoken lists ("First… second… third…", "Here are my tasks: …") become numbered or bulleted lines.
@@ -59,6 +59,8 @@ Click into any text field, then:
 
 Recordings shorter than 0.3 seconds are ignored as accidental taps. Right Alt still works as Alt in key combinations. Saydown just stops a lone press from opening an app's menu bar.
 
+On many keyboards outside the US (German, French, Spanish, Polish, Nordic, UK, US-International and others), right Alt is **AltGr**, the key you hold to type @, € or é. If any keyboard layout installed in Windows uses AltGr, Saydown's shortcut starts as **right Ctrl** instead, so typing those characters never starts a recording. The window's Settings and "Ways to dictate" show the shortcut you have.
+
 To change the shortcut, open Settings → Shortcut → Change. Then press a single modifier key (right Ctrl, say), a function key, or a combination such as Ctrl+Alt+D. A combination is swallowed so the app in front never sees it.
 
 Pasting goes through the clipboard. Text you had copied is put back right afterwards.
@@ -67,7 +69,7 @@ Pasting goes through the clipboard. Text you had copied is put back right afterw
 
 | Setting | Where | Default |
 |---|---|---|
-| Shortcut | Settings | Right Alt |
+| Shortcut | Settings | Right Alt (right Ctrl with an AltGr keyboard layout) |
 | Microphone | Settings | Windows default input |
 | Dictation language | Settings | Auto-detect |
 | Idle pill visibility | Settings | 30% |
