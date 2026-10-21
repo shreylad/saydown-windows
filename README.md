@@ -4,6 +4,8 @@
 
 Hold a key, talk, release. Cleaned-up text is pasted at your cursor, in any app.
 
+> **Early release:** not yet tested on real Windows hardware. If something breaks, please [open an issue](https://github.com/shreylad/saydown-windows/issues).
+
 A private dictation app for Windows. Your speech is transcribed by Whisper and tidied by a small language model (Google's Gemma 4 E4B), both running on your PC: on your NVIDIA graphics card when you have one, otherwise on the processor. No recording ever leaves your computer, and there is no account or subscription.
 
 ## What it does
