@@ -1,0 +1,62 @@
+# On every push: run the tests on Windows, build Saydown-Setup.exe, install it and check Saydown starts.
+# On a v* tag: also publish the installer as a GitHub release.
+name: release
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+
+      - name: Unit tests
+        run: uv run --no-project --with numpy python -m unittest test_rules test_app test_ai -v
+
+      - name: Fetch uv to bundle
+        run: |
+          Invoke-WebRequest https://github.com/astral-sh/uv/releases/latest/download/uv-x86_64-pc-windows-msvc.zip -OutFile uv.zip
+          Expand-Archive uv.zip installer\uv
+          Get-ChildItem installer\uv
+
+      - name: Build installer
+        run: |
+          $version = if ("${{ github.ref_type }}" -eq "tag") { "${{ github.ref_name }}".TrimStart("v") } else { "0.0.0" }
+          choco install innosetup -y --no-progress
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DVersion=$version" installer\saydown.iss
+          if ($LASTEXITCODE) { exit 1 }
+
+      - name: Install it and start Saydown
+        run: |
+          Start-Process dist\Saydown-Setup.exe -ArgumentList "/VERYSILENT /SUPPRESSMSGBOXES /TASKS=desktopicon" -Wait
+          $app = "$env:LOCALAPPDATA\Programs\Saydown"
+          foreach ($f in "saydown.py", "uvw.exe", "ui.html") { if (-not (Test-Path "$app\$f")) { throw "missing $f" } }
+          foreach ($l in "$([Environment]::GetFolderPath('Programs'))\Saydown.lnk", "$([Environment]::GetFolderPath('Desktop'))\Saydown.lnk") { if (-not (Test-Path $l)) { throw "missing $l" } }
+          # what the Start menu shortcut does; the first run installs the Python packages (about 2 GB)
+          Start-Process "$app\uv.exe" -ArgumentList "run saydown.py" -WorkingDirectory $app -RedirectStandardOutput out.txt -RedirectStandardError err.txt
+          $deadline = (Get-Date).AddMinutes(15)
+          while ((Get-Date) -lt $deadline) {
+            try { $state = Invoke-RestMethod http://127.0.0.1:8737/api/state; break } catch { Start-Sleep 5 }
+          }
+          Get-Content err.txt -Tail 40
+          Get-Content "$env:APPDATA\Saydown\saydown.log" -Tail 40 -ErrorAction SilentlyContinue
+          if (-not $state) { throw "Saydown did not answer on port 8737" }
+          $state | ConvertTo-Json -Depth 3 | Select-Object -First 30
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Saydown-Setup
+          path: dist/Saydown-Setup.exe
+
+      - name: Publish release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create ${{ github.ref_name }} dist\Saydown-Setup.exe --title "Saydown ${{ github.ref_name }}" --notes "Download **Saydown-Setup.exe**, double-click it, and Saydown opens when it finishes. See the README for details."
