@@ -4,7 +4,7 @@
 
 Hold a key, talk, release. Cleaned-up text is pasted at your cursor, in any app.
 
-> **Early release:** not yet tested on real Windows hardware. If something breaks, please [open an issue](https://github.com/shreylad/saydown-windows/issues).
+> **Early release.** Every build is installed and started on a Windows machine by GitHub Actions, but dictating with a real microphone and keyboard has not been tested yet. If something breaks, please [open an issue](https://github.com/shreylad/saydown-windows/issues).
 
 A private dictation app for Windows. Your speech is transcribed by Whisper and tidied by a small language model (Google's Gemma 4 E4B), both running on your PC: on your NVIDIA graphics card when you have one, otherwise on the processor. No recording ever leaves your computer, and there is no account or subscription.
 
@@ -25,13 +25,23 @@ A private dictation app for Windows. Your speech is transcribed by Whisper and t
 
 ## Install and run
 
-You need Windows 10 or 11, about 12 GB of free disk space and, for speed, an NVIDIA graphics card. Download this repository (Code → Download ZIP, then unzip it somewhere permanent, such as your Documents folder), open the folder, and run:
+You need Windows 10 or 11 (64-bit), about 12 GB of free disk space and, for speed, an NVIDIA graphics card.
+
+1. Download **[Saydown-Setup.exe](https://github.com/shreylad/saydown-windows/releases/latest/download/Saydown-Setup.exe)**.
+2. Double-click it. Windows may say "Windows protected your PC", because the installer is not signed: click **More info**, then **Run anyway**. No administrator rights are needed.
+3. Saydown opens when the installer finishes, and stays in the Start menu.
+
+The installer brings [uv](https://docs.astral.sh/uv/) with it, which installs Python and Saydown's packages on its own, including NVIDIA's CUDA libraries. To remove Saydown, go to Settings → Apps → Installed apps → Saydown → Uninstall. Your dictations stay in `%APPDATA%\Saydown` until you delete that folder.
+
+### From source
+
+Download this repository (Code → Download ZIP, then unzip it somewhere permanent, such as your Documents folder), open the folder, and run:
 
 ```
 powershell -ExecutionPolicy Bypass -File install.ps1
 ```
 
-This installs [uv](https://docs.astral.sh/uv/) if you don't have it, and adds Saydown to the Start menu with its icon. Add `-Desktop` for a desktop shortcut, `-Startup` to start Saydown when you sign in, or `-Remove` to take the shortcuts away. uv installs Python and Saydown's packages on its own, including NVIDIA's CUDA libraries.
+This installs uv if you don't have it, and adds Saydown to the Start menu with its icon. Add `-Desktop` for a desktop shortcut, `-Startup` to start Saydown when you sign in, or `-Remove` to take the shortcuts away.
 
 Then open **Saydown** from the Start menu. To run it from a terminal instead, with a log of every dictation, double-click **`start.bat`** or run:
 
