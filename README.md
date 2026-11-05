@@ -142,4 +142,4 @@ Saydown started on the Mac: see [Saydown for Mac](https://github.com/shreylad/sa
 
 ## Licence
 
-MIT. See LICENSE.
+GPL-3.0. See LICENSE.
