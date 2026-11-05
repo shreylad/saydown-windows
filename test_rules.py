@@ -46,14 +46,149 @@ class TextRules(unittest.TestCase):
     def test_corrections_go_through_clean(self):
         samples = ["Send it Tuesday, sorry, Wednesday.",
                    "Sorry I am late. Send it Tuesday, no wait, Wednesday.",
-                   "Sorry, please cancel the flight.",
                    "I think we should, actually scratch that, send the invoice.",
-                   "Sorry I'm late, no wait, I mean early.",
-                   "Sorry I am late"]
+                   "Sorry I'm late, no wait, I mean early."]
         for text in samples:
             with patch.object(a, "clean", return_value="Corrected text.") as clean:
                 self.assertEqual(a.polish(text), "Corrected text.")
                 clean.assert_called_once_with(text)
+
+    def test_only_the_corrected_sentence_and_the_one_before_go_to_the_model(self):
+        raw = ("Good morning. Revenue was up 12.5%. Is this working? The forecast for Q4 looks strong, wait, no, "
+               "I mean Q1. Call me before 3.45 pm.")
+        with patch.object(a, "clean", return_value="Fixed.") as clean:
+            self.assertEqual(a.polish(raw), "Good morning. Revenue was up 12.5%. Fixed. Call me before 3.45 pm.")
+        clean.assert_called_once_with("Is this working? The forecast for Q4 looks strong, wait, no, I mean Q1.")
+
+    def test_clear_self_corrections_are_resolved_without_the_model(self):
+        for said, expected in (
+                ("We should send the report on Tuesday, wait, no, I mean Thursday.", "We should send the report on Thursday."),
+                ("We should send the report on Tuesday. Wait, no, I mean Thursday.", "We should send the report on Thursday."),
+                ("Meet on Tuesday, I mean Thursday.", "Meet on Thursday."),
+                ("Meet on Tuesday morning, no wait, I mean Thursday.", "Meet on Thursday morning."),
+                ("Next Tuesday, sorry, I mean next Thursday morning.", "Next Thursday morning."),
+                ("It launches in March, wait, no, I mean April. Tell the team.", "It launches in April. Tell the team."),
+                ("It costs $50 a month, wait, no, I mean $60.", "It costs $60 a month."),
+                ("It costs $48.50, wait, no, I mean $49.75.", "It costs $49.75."),
+                ("Buy 3 new laptops, wait, no, I mean 4.", "Buy 4 new laptops."),
+                ("Call at 3 pm, wait, no, make that 4 pm.", "Call at 4 pm."),
+                ("Buy 3 new laptops, wait, no, I mean 4 tablets.", "Buy 4 tablets."),
+                ("Meet at the office, wait, no, I mean the cafe.", "Meet at the cafe."),
+                ("Email John, wait, no, I mean Jane Doe.", "Email Jane Doe."),
+                ("First one. Meet on Monday, I mean Friday. Last one.", "First one. Meet on Friday. Last one."),
+                ("Tuesday, I mean Wednesday. Monday, I mean Friday.", "Wednesday. Friday.")):
+            with self.subTest(said=said), patch.object(a, "clean", side_effect=AssertionError("model called")):
+                self.assertEqual(a.corrected(said), expected)
+
+    def test_unclear_or_ordinary_wording_is_not_rewritten_by_the_rule(self):
+        for text in ("I can't wait, no problem at all.",
+                     "Please make that call.",
+                     "I mean the results were good overall this week.",
+                     "The report was good. I mean the results.",
+                     "We need more staff, wait, no, I mean fewer.",
+                     "Meet on Tuesday, wait, no, I mean Thursday, and call the whole team.",
+                     "I mean Thursday.",
+                     "Line one on Tuesday.\nI mean Thursday."):
+            with self.subTest(text=text):
+                self.assertEqual(a.fix_corrections(text), text)
+
+    def test_a_correction_the_rule_cannot_resolve_still_goes_to_the_model(self):
+        with patch.object(a, "clean", return_value="Fewer staff.") as model:
+            self.assertEqual(a.corrected("We need more staff, wait, no, I mean fewer."), "Fewer staff.")
+        model.assert_called_once()
+
+    def test_ordinary_uses_of_correction_words_skip_the_model(self):
+        for text in ("Sorry to interrupt you, but I have one question.",
+                     "Sorry, please cancel the flight.",
+                     "Sorry I am late",
+                     "Sorry, which color do you prefer?",
+                     "I mean the blue one is nicer.",
+                     "No, I mean that the parcel has arrived.",
+                     "Hey, can you try this? Actually I baked it first.",
+                     "She knows what actually happened.",
+                     "I would rather take the train.",
+                     "Bake the cake from the scratch.",
+                     "I can't wait to see it.",
+                     "Please wait for the report.",
+                     "I am sorry for the delay.",
+                     "We are sorry about that, truly."):
+            with self.subTest(text=text), patch.object(a, "clean", side_effect=AssertionError("model called")):
+                a.corrected(text)
+
+    def test_real_corrections_the_rule_cannot_resolve_still_reach_the_model(self):
+        for text in ("Send the parcel by Thursday. Sorry, Friday.",
+                     "Use the red pen and blue sorry blue only.",
+                     "I want some green sorry I want some tea.",
+                     "The forecast for quarter 4 looks strong, wait, no, I mean quarter 1, assuming bookings hold.",
+                     "It uses the, system, I mean the long system for storage.",
+                     "We need more staff, wait, fewer.",
+                     "We need more staff, or rather fewer.",
+                     "Keep the staff. Actually, no, cut them.",
+                     "Keep the staff, actually cut them.",
+                     "Keep the staff. Scratch that.",
+                     "Keep the staff. Let me rephrase.",
+                     "Keep the staff. Start over."):
+            with self.subTest(text=text), patch.object(a, "clean", return_value="Model.") as model:
+                a.corrected(text)
+                model.assert_called()
+
+    def test_punctuation_and_breaks_said_aloud_are_written(self):
+        raw = ("It works. New paragraph is this working? Question mark? Yes, comma, it is exclamation mark. "
+               "New line. email sri at srila dot com")
+        self.assertEqual(a.polish(raw), "It works.\n\nIs this working? Yes, it is!\nEmail sri at srila.com")
+        for text in ["We need a new line of credit.", "New line items were added.", "Start a new paragraph here.",
+                     "Commas and full stops matter."]:
+            self.assertEqual(a.polish(text), text)
+
+    def test_dollar_amounts_with_cents_are_joined_without_a_model(self):
+        cases = {
+            "Revenue was $48,375. and 62 cents.": "Revenue was $48,375.62.",
+            "$48,375 and 62 cents": "$48,375.62",
+            "It cost $5, and 2 cents!": "It cost $5.02!",
+            "It cost $5. And 1 cent.": "It cost $5.01.",
+            "It cost $0 and 05 cents.": "It cost $0.05.",
+            "It cost $5000 and 99 cents.": "It cost $5000.99.",
+            "Refund -$12 and 50 cents.": "Refund -$12.50.",
+            "Pay $1 and 2 cents, then $3 and 4 cents.": "Pay $1.02, then $3.04.",
+            "It cost $5 comma and 2 cents.": "It cost $5.02.",
+            "Revenue was 48,375.62 cents.": "Revenue was $48,375.62.",  # Whisper dropped "dollars"
+        }
+        with patch.object(a, "llm") as llm:
+            for raw, expected in cases.items():
+                with self.subTest(raw=raw):
+                    self.assertEqual(a.polish(raw), expected)
+                    self.assertEqual(a.polish(expected), expected)
+            llm.assert_not_called()
+
+    def test_money_rule_preserves_decimals_and_ambiguous_amounts(self):
+        for text in ["It cost $48,375.62.", "Pay $5.50 and 20 cents.", "Pay $5 and 100 cents.",
+                     "Pay $5 and 2.5 cents.", "Pay $5 and 2 percent.", "Pay 5 and 20 cents.",
+                     "Pay $1,23 and 45 cents.", "Pay $5.\n\nAnd 20 cents for postage."]:
+            with self.subTest(text=text):
+                self.assertEqual(a.polish(text), text)
+
+    def test_money_is_joined_before_selecting_self_correction_sentences(self):
+        raw = "Revenue was $48,375. and 62 cents. Wait, I mean $50,000."
+        with patch.object(a, "clean") as clean:
+            self.assertEqual(a.polish(raw), "Revenue was $50,000.")
+        clean.assert_not_called()
+
+    def test_a_stop_at_a_phrase_cut_goes_when_the_sentence_carries_on(self):
+        for parts, expected in (
+                (["we moved local speech.", "back to whisper."], "we moved local speech back to whisper."),
+                (["It came in at $142.00.", "and ADR was $189."], "It came in at $142.00 and ADR was $189."),
+                (["One.", "two.", "three."], "One two three."),
+                (["A real sentence.", "Another one."], "A real sentence. Another one."),
+                (["Is it working?", "and then what."], "Is it working? and then what."),
+                (["Bread, milk, etc.", "and more."], "Bread, milk, etc. and more."),
+                (["We start at 9 a.m.", "and finish at noon."], "We start at 9 a.m. and finish at noon."),
+                (["Wait for it...", "and go."], "Wait for it... and go."),
+                (["I bought one.", "iPhone sales grew."], "I bought one. iPhone sales grew."),
+                (["Sales rose.", "$5 more."], "Sales rose. $5 more."),
+                (["", "only this."], "only this."),
+                ([], "")):
+            with self.subTest(parts=parts):
+                self.assertEqual(a.join_phrases(parts), expected)
 
     def test_corrections_without_a_model_keep_every_word(self):
         self.assertEqual(a.polish("um send it tuesday, sorry, wednesday"), "Send it tuesday, sorry, wednesday")
@@ -127,9 +262,12 @@ class TextRules(unittest.TestCase):
 
     def test_self_correction_is_cleaned_before_list_formatting(self):
         raw = "First send it Tuesday, I mean Wednesday. Second archive it."
-        with patch.object(a, "clean", return_value="First send it Wednesday. Second archive it.") as clean:
+        with patch.object(a, "clean", side_effect=AssertionError("a clear correction is resolved by rule")):
             self.assertEqual(a.polish(raw), "1. Send it Wednesday.\n2. Archive it.")
-        clean.assert_called_once_with(raw)
+        raw = "First send it Tuesday, wait, no, fewer copies. Second archive it."
+        with patch.object(a, "clean", return_value="First send it Tuesday with fewer copies.") as clean:
+            self.assertEqual(a.polish(raw), "1. Send it Tuesday with fewer copies.\n2. Archive it.")
+        clean.assert_called_once_with("First send it Tuesday, wait, no, fewer copies.")
 
     def test_list_formatting_preserves_dictionary_spellings(self):
         with patch.object(a, "term_list", return_value=["apple tree -> AppleTree"]):

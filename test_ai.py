@@ -6,6 +6,11 @@ import datetime, json, os, tempfile, unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import ctypes, sys
+
+if sys.platform != "win32":  # the pure-Python parts are tested on a Mac too; the real calls run on Windows (CI)
+    from unittest.mock import MagicMock
+    ctypes.WinDLL, ctypes.WINFUNCTYPE = lambda *a, **k: MagicMock(), ctypes.CFUNCTYPE
 os.environ["SAYDOWN_DATA"] = tempfile.mkdtemp(prefix="saydown-test-")
 import ai
 import saydown

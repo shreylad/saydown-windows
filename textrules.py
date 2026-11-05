@@ -2,14 +2,17 @@
 
 Ported unchanged from the Mac version's dictate.py so the two behave the same; keep them in sync.
 """
-import difflib, re
+import difflib, itertools, re, time
 from pathlib import Path
 
 DICTIONARY = Path("dictionary.txt")  # set by saydown.py to the file in the data folder
 
 # Signs that the speaker corrected themselves. Only then is the cleanup model worth its second or so; everything
 # else is tidied by the rules in tidy(), which is how the faster dictation apps do it.
-CUES = re.compile(r"\b(sorry|wait|scratch|i mean|actually|rather|rephrase|correction|start over|no,? no)\b", re.I)
+CUES = re.compile(r"\b(?:(?<!\bam )(?<!\bare )(?<!i'm )(?<!i’m )sorry(?!\s+(?:to|for|about)\b)|wait(?=[,.]|\s+(?:no|i mean)\b)|no,?\s+wait"
+                  r"|scratch that|i mean|(?<=, )actually|actually,?\s+no|no,?\s+actually|or rather|rephrase|correction|start over|no,? no)\b", re.I)
+# Opening a dictation there is nothing before them to correct: "Sorry, one question...", "No, I mean that..."
+OPENING = re.compile(r"^\W*(?:(?:no|um+|uh+),?\s+)*(?:sorry|i mean)\b", re.I)
 # Only complete, unambiguous courtesy sentences bypass the correction model.
 COURTESY = re.compile(r"(?:^|(?<=[.!?]))\s*sorry(?:,\s*|\s+)(?:i(?:['’]m| am) late|for (?:the )?delay)[.!?](?=\s|$)", re.I)
 # um, uh, uhm, er, erm, hmm, mm; but not an acronym (ER), a hyphenated word (mm-hmm) or a quoted one ("um")
@@ -75,7 +78,9 @@ def clean(raw):
         system += (f"\n\nThe speaker's dictionary: {terms()}\nIf a word or phrase in the transcript sounds like a "
                    "dictionary entry, it was misheard: replace it with the dictionary spelling. Change nothing else.")
     try:
+        started = time.monotonic()
         out = llm(system, f"<transcript>{raw}</transcript>", temperature=0)
+        print(f"cleanup by model: {time.monotonic() - started:.1f}s for {len(raw.split())} words")
     except Exception as e:  # never lose what was said: fall back to the rules
         print("cleanup failed, tidying by rule instead:", e)
         return tidy(raw)
@@ -277,8 +282,115 @@ def spoken_bullets(text):
             ("\n\n" + tail if tail else ""))
 
 
+# "on Tuesday, wait, no, I mean Thursday": the cue, and the words that replace the old ones
+CORRECTION = re.compile(r"(?P<lead>[,.;!?\- ]*)\b(?:(?P<cue>wait,?\s+no|no,?\s+wait|wait|sorry|no|actually(?:,?\s+no)?)[,.]?\s+)?"
+                        r"(?:i mean|i meant|make that)[,:]?\s+(?P<new>[^\n]+?)(?=[.!?](?:\s|$)|\n|$)", re.I)
+WORD_KINDS = (  # a correction of one kind of word replaces the nearest word of the same kind
+    re.compile(r"(?:mon|tues|wednes|thurs|fri|satur|sun)day|today|tomorrow|yesterday", re.I),
+    re.compile(r"january|february|march|april|may|june|july|august|september|october|november|december", re.I),
+    re.compile(r"\$?\d[\d,.:]*\S*"),
+)
+
+
+def replaced(before, new, explicit):
+    """The sentence ending in before, with the words that new corrects swapped; None unless it is clear which they are."""
+    words = new.split()
+    if ", " in new or len(words) > 4:
+        return None
+    start = max((m.end() for m in re.finditer(r"[.!?]\s|\n", before)), default=0)
+    tokens = before[start:].split()
+    if not tokens:
+        return None
+
+    def bare(token):
+        return token.strip(",;:.!?\"'()")
+
+    tail = range(len(tokens) - 1, max(len(tokens) - 7, -1), -1)  # the nearest first, at most six words back
+    kind = next((k for k in WORD_KINDS if k.fullmatch(bare(words[0]))), None)
+    at = next((i for i in tail if kind and kind.fullmatch(bare(tokens[i]))), None)
+    if at is not None:
+        tokens[at:at + 1 if len(words) == 1 else len(tokens)] = words
+    elif explicit is not None or len(words) > 1:
+        same = next((i for i in tail if len(words) > 1 and bare(tokens[i]).casefold() == bare(words[0]).casefold()), None)
+        if same is not None:  # "at the office ... the cafe"
+            tokens[same:] = words
+        elif words[0][0].isupper() and bare(tokens[-1])[:1].isupper() and len(tokens) > 1 and explicit is not None:  # names
+            tokens[-1:] = words
+        else:
+            return None
+    else:
+        return None
+    return before[:start] + " ".join(tokens)
+
+
+def fix_corrections(text):
+    """Resolve "on Tuesday, wait, no, I mean Thursday" by rule. The model takes a second at best, six or more when it
+    has to load again. Anything unclear is left for the model."""
+    at = 0
+    while match := CORRECTION.search(text, at):
+        crossed = re.search(r"[.!?]", match["lead"])  # a bare "I mean" opening a sentence is rarely a correction
+        fixed = None if crossed and not match["cue"] else replaced(text[:match.start()], match["new"], match["cue"])
+        if fixed is None:
+            at = match.end()
+        else:
+            text, at = fixed + text[match.end():], len(fixed)
+    return text
+
+
+def corrected(raw):
+    """Tidied by rule, except where the speaker corrected themselves in a way the rule can't resolve: that sentence and
+    the one before it go to the model. Only those, as the model takes seconds for a minute of speech and well under one
+    for a sentence."""
+    raw = fix_corrections(raw)
+    sentences = re.split(r"(?<=[.!?])(?=\s)", raw)  # each keeps the space before it, which may be a paragraph break
+    cued = [bool(CUES.search(COURTESY.sub("", OPENING.sub("", s) if i == 0 else s))) for i, s in enumerate(sentences)] + [False]
+    out = ""
+    for send, run in itertools.groupby(range(len(sentences)), lambda i: cued[i] or cued[i + 1]):
+        text = "".join(sentences[i] for i in run)
+        out += text[:len(text) - len(text.lstrip())] + (clean if send else tidy)(text.strip())
+    return out
+
+
+MARKS = {"question mark": "?", "exclamation mark": "!", "exclamation point": "!", "comma": ",", "full stop": "."}
+
+
+def marks(text):
+    """Punctuation and breaks said aloud: "is it working question mark", "new paragraph", "dot com"."""
+    def mark(m):  # the sign replaces the words and any comma or stop around them; a new sentence gets its capital
+        sign, after = MARKS[m[1].lower()], m[2] or ""
+        return sign + (after if sign == "," else after.upper())
+
+    text = re.sub(r"[,.?!]?\s*\b(question mark|exclamation (?:mark|point)|comma|full stop)\b[,.!?]?(\s+[a-z])?", mark,
+                  text, flags=re.I)
+    # "new line" only on its own, as in "New line items were added" it is content
+    text = re.sub(r"(?:^|(?<=[.!?\n]))[^\S\n]*\bnew (?:(paragraph)|line\b(?=[.,:!]|\s+(?-i:[A-Z0-9])|\s*$))\b[.,:!]?\s*",
+                  lambda m: "\n\n" if m[1] else "\n", text, flags=re.I)
+    text = re.sub(r"\b(\w+) dot (com|org|net|io|ai|co)\b", r"\1.\2", text, flags=re.I)
+    # "$48,375. and 62 cents": before sentences are split, so the stray stop cannot split a correction
+    text = re.sub(r"(\$(?:\d{1,3}(?:,\d{3})+|\d+))[.,]?[^\S\n]+and[^\S\n]+(\d{1,2})[^\S\n]+cents?\b", lambda m: f"{m[1]}.{int(m[2]):02d}",
+                  text, flags=re.I)
+    # Whisper's "48,375.62 cents" for "...dollars and 62 cents"; the thousands comma rules out a real amount of cents
+    text = re.sub(r"(?<![\d$])(\d{1,3}(?:,\d{3})+\.\d\d) cents\b", r"$\1", text)
+    return re.sub(r"\n[a-z]", lambda m: m[0].upper(), text)
+
+
+ABBREVIATION = r"\b(?:mr|mrs|ms|dr|prof|sr|jr|vs|etc|e\.g|i\.e|a\.m|p\.m)\."
+
+
+def join_phrases(texts):
+    """All the phrases as one text. Whisper hears each alone, so it ends a phrase with a stop even mid-sentence."""
+    joined = ""
+    for text in filter(None, texts):
+        # ponytail: a lowercase next word is the only sign; a missing stop before a capital is left alone
+        if joined.endswith(".") and re.match(r"[a-z]+(?![^\W\d_])", text) and not joined.endswith("..") \
+                and not re.search(ABBREVIATION + "$", joined, re.I):
+            joined = joined[:-1]
+        joined += (" " if joined else "") + text
+    return joined
+
+
 def polish(raw):
-    """What to type for a transcript: tidied by rule, or by the model when the speaker corrected themselves."""
-    text = respell(fuzzy(clean(raw) if CUES.search(COURTESY.sub("", raw)) else tidy(raw)))
+    """What to type for a transcript: tidied by rule, or by the model where the speaker corrected themselves."""
+    text = respell(fuzzy(corrected(marks(raw))))
     numbered = spoken_list(text)
     return numbered if numbered != text else spoken_bullets(text)

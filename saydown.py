@@ -27,7 +27,7 @@ os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
 import ai
 import textrules
 from ai import plain
-from textrules import polish, respell, spoken, term_list, terms
+from textrules import join_phrases, polish, respell, spoken, term_list, terms
 
 # ---- where things live --------------------------------------------------------------------------------------
 
@@ -514,6 +514,11 @@ class Recorder:
             with self.lock:
                 self.chunks.append(audio[at:at + step])
 
+    def so_far(self):
+        """The recording so far, while it goes on."""
+        with self.lock:
+            return np.concatenate(self.chunks) if self.chunks else np.zeros(0, np.float32)
+
     def stop(self):
         """The recording so far, and the microphone closed."""
         if self.fake:
@@ -587,7 +592,8 @@ def load_whisper():
     for device, kind in (("cuda", "float16"), ("cpu", "int8")):
         try:
             model = WhisperModel(folder, device=device, compute_type=kind)
-            list(model.transcribe(np.zeros(RATE, np.float32), language="en")[0])  # warm up, and prove it works
+            # warm up, and prove it works; noise rather than silence, which leaves the first real dictation slow
+            list(model.transcribe(np.random.default_rng(0).normal(0, 0.1, RATE).astype(np.float32), language="en")[0])
             status["device"] = device
             print(f"speech model ready on the {'GPU' if device == 'cuda' else 'CPU'}")
             return model
@@ -596,11 +602,84 @@ def load_whisper():
     raise OSError("the speech model could not load")
 
 
+whisper_lock = threading.Lock()  # one recording's phrases and the last recording's tail must not share the model
+
+
 def transcribe(model, audio, language):
-    segments, _ = model.transcribe(audio, language=language, initial_prompt=terms() or None, vad_filter=True,
-                                   condition_on_previous_text=False)
-    segments = list(segments)
+    with whisper_lock:
+        segments, _ = model.transcribe(audio, language=language, initial_prompt=terms() or None, vad_filter=True,
+                                       condition_on_previous_text=False)
+        segments = list(segments)
     return "".join(s.text for s in segments).strip(), segments
+
+
+PIECE = 5  # seconds: the shortest phrase transcribed on its own; shorter ones lose the context that gets words right
+PAUSE = 0.3  # seconds of quiet that separate two phrases
+
+
+def pause_at(audio, start):
+    """The middle of the first pause at least PIECE seconds after start, where the recording can be cut; or None."""
+    frame, need = RATE // 20, int(PAUSE * 20)  # 50 ms frames
+    if len(audio) - start < (PIECE + PAUSE) * RATE:
+        return None
+    n = (len(audio) - start) // frame
+    loud = np.sqrt(np.mean(audio[start:start + n * frame].reshape(n, frame) ** 2, axis=1))
+    # quiet relative to how loud this speaker is, so it works for any microphone
+    quiet = (loud < 0.15 * np.percentile(loud, 90)).astype(int)
+    runs = np.flatnonzero(np.convolve(quiet, np.ones(need, int), "valid") == need)
+    runs = runs[runs >= PIECE * 20]
+    return start + (int(runs[0]) + need // 2) * frame if len(runs) else None
+
+
+class Phrases:
+    """Transcribes a recording phrase by phrase while it is still being made, as the Mac version, Glaido and Wispr
+    Flow do, so that when the key goes up only the last phrase is left. One per recording."""
+
+    def __init__(self, recorder, model, language):
+        self.recorder, self.model, self.language = recorder, model, language
+        self.done, self.texts, self.failed, self.audio = 0, [], False, None
+        self.released_at = self.queued_at = None
+        self.stop = threading.Event()
+        self.thread = threading.Thread(target=self.watch, daemon=True, name="phrases")
+        self.thread.start()
+
+    def watch(self):
+        while not self.stop.wait(0.25):
+            try:
+                audio = self.recorder.so_far()
+                cut = pause_at(audio, self.done)
+                if cut:
+                    self.hear(audio[self.done:cut])
+                    self.done = cut
+            except Exception:  # finish() then transcribes the whole recording at once, as before
+                traceback.print_exc()
+                self.failed = True
+                return
+
+    def hear(self, audio):
+        if np.abs(audio).max() < QUIET:  # a long silence; Whisper would invent words for it
+            return
+        text, segments = transcribe(self.model, audio, self.language)
+        if not (segments and all(seg.no_speech_prob > 0.6 for seg in segments)):  # Whisper's own "nobody spoke"
+            self.texts.append(text)
+
+    def ended(self, audio):
+        """The key went up: here is the whole recording, and the microphone is closed."""
+        self.audio = audio
+        self.stop.set()
+
+    def end(self):
+        """The whole recording, once no phrase is still being transcribed."""
+        self.thread.join()
+        return self.audio
+
+    def finish(self, audio):
+        """Transcribe what is left after the last pause; return all the words."""
+        if self.failed:
+            self.done, self.texts = 0, []
+        if len(audio) - self.done >= RATE * TAP or not self.texts:
+            self.hear(audio[self.done:])
+        return join_phrases(self.texts)
 
 
 # ---- the keyboard -------------------------------------------------------------------------------------------
@@ -1042,6 +1121,8 @@ def main():
     threading.Thread(target=ai.setup, args=(speech_ready,), daemon=True, name="ai-setup").start()
 
     recorder = Recorder()
+    speech = [None]  # the Whisper model, once the worker has loaded it
+    pieces = [None]  # the current recording's Phrases
     lock = threading.Lock()
     hands_free = [False]  # True when recording runs until the next click or tap, with no key held
     pressed_at, last_tap = [0.0], [0.0]
@@ -1071,15 +1152,19 @@ def main():
                     status["mic_error"] = "Windows would not open the microphone. Check it in Settings > System > Sound."
                     pill("No microphone")
                     return
+                language = settings()["language"]
+                pieces[0] = Phrases(recorder, speech[0], None if language == "auto" else language)
                 print("recording...")
 
     def stop():
         with lock:
             if recording[0]:
                 recording[0] = False
-                audio = recorder.stop()
+                pieces[0].released_at = time.perf_counter()
+                pieces[0].ended(recorder.stop())
                 pill("busy")
-                jobs.put((audio, note[0]))
+                pieces[0].queued_at = time.perf_counter()
+                jobs.put((pieces[0], note[0]))
 
     def toggle():
         stop() if recording[0] else start(by_click=True)
@@ -1108,7 +1193,11 @@ def main():
 
     keyboard = Keyboard(lambda what: controls.put(key_down if what == "down" else key_up), pill.refresh)
 
-    def dictate(model, audio, as_note):
+    def dictate(pieces, as_note):
+        begun = time.perf_counter()
+        released = pieces.released_at if pieces.released_at is not None else begun
+        queued = pieces.queued_at if pieces.queued_at is not None else begun
+        audio = pieces.end()
         if len(audio) < RATE * TAP:  # accidental tap; Whisper invents text from silence
             print(f"skipped: only {len(audio) / RATE:.1f}s recorded")
             return
@@ -1116,20 +1205,19 @@ def main():
         if peak < QUIET:
             print(f"skipped: too quiet to be speech (peak level {peak:.3f})")
             return
-        print(f"transcribing {len(audio) / RATE:.1f}s (peak level {peak:.2f})...")
-        begun = time.time()
-        language = settings()["language"]
-        raw, segments = transcribe(model, audio, None if language == "auto" else language)
-        heard = time.time() - begun
+        print(f"transcribing {len(audio) / RATE:.1f}s, {pieces.done / RATE:.1f}s of it already done "
+              f"(peak level {peak:.2f})...")
+        raw = pieces.finish(audio)
+        heard_at = time.perf_counter()
+        heard = heard_at - begun
         invented = len(raw.split()) > 6 * len(audio) / RATE + 3  # nobody speaks six words a second
-        silent = segments and all(seg.no_speech_prob > 0.6 for seg in segments)
-        if not spoken(raw) or invented or silent:
+        if not spoken(raw) or invented:  # phrases Whisper thought silent were already dropped
             print("skipped: no speech heard")
             return
         if as_note:  # ponytail: one voice, no speaker labels; needs a diarisation model to tell people apart
-            print(f"[{time.time() - begun:.1f}s] note saved: {len(raw.split())} words")
+            print(f"[{time.perf_counter() - released:.1f}s] note saved: {len(raw.split())} words")
             return remember(respell(raw), raw, len(audio) / RATE, kind="note")
-        took = lambda: f"[{time.time() - begun:.1f}s, speech {heard:.1f}s]"
+        took = lambda: f"[{time.perf_counter() - released:.1f}s, speech {heard:.1f}s]"
         last = last_paste[0]
         # only a short remark soon after a dictation can be a command, so normal dictations pay nothing for this
         if settings()["voice_commands"] and last and time.time() - last["at"] < 120 and len(raw.split()) <= 12:
@@ -1158,18 +1246,22 @@ def main():
         if not text:
             print("skipped: nothing but filler sounds")
             return
+        cleaned_at = time.perf_counter()
         deliver(text + " ")  # trailing space so back-to-back dictations don't run together
+        delivered_at = time.perf_counter()
         last_paste[0] = {"text": text, "at": time.time(), "before": None}
+        print(f"dictation timing: stop={queued - released:.3f}s queue={begun - queued:.3f}s speech={heard:.3f}s "
+              f"cleanup={cleaned_at - heard_at:.3f}s delivery={delivered_at - cleaned_at:.3f}s "
+              f"total={delivered_at - released:.3f}s")
         print(f"{took()} raw:   {raw}\n        clean: {text}")
         remember(text, raw, len(audio) / RATE)
 
     def worker():
         print("loading the speech model...")
         try:
-            model = load_whisper()
+            speech[0] = load_whisper()
             status["model"] = {"step": "ready"}
         except Exception as error:
-            model = None
             status["speech_error"] = "The speech model could not load. Check your connection and restart Saydown."
             status["model"] = {"step": "failed", "error": str(error)}
             print(status["speech_error"], error)
@@ -1204,7 +1296,7 @@ def main():
                     pill(shown)
                 continue
             try:
-                dictate(model, *job)
+                dictate(*job)
             except Exception:
                 status["delivery"] = "Dictation could not complete. The details are in saydown.log."
                 traceback.print_exc()

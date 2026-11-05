@@ -97,8 +97,8 @@ On a laptop with an RTX 2070 Max-Q (8 GB), `bench.py` scores the text model at 4
 
 - A low-level keyboard hook (`SetWindowsHookEx`) watches for the shortcut in every app.
 - `sounddevice` records from the microphone through WASAPI, only while you dictate.
-- `faster-whisper` transcribes the audio, with its voice filter dropping silence.
-- `textrules.py` cleans up the transcript by rule. When you corrected yourself, it asks the text model what you meant.
+- `faster-whisper` transcribes the audio, with its voice filter dropping silence. While you hold the key, every phrase is transcribed at the next pause (`Phrases` in `saydown.py`), so when you release it only the last few seconds are left to do.
+- `textrules.py` cleans up the transcript by rule, including punctuation said aloud ("question mark", "new paragraph", "dot com") and clear self-corrections ("Tuesday, I mean Thursday"). Only a sentence it cannot resolve goes to the text model, together with the one before it.
 - `ai.py` runs the text model with llama.cpp (`llama-cpp-python`, built for NVIDIA cards) and holds the prompts for Rewrite, Ask and voice commands.
 - The result goes to the clipboard and is pasted with Ctrl+V.
 
@@ -110,7 +110,9 @@ The pill is a borderless Tk window marked `WS_EX_NOACTIVATE`, so clicking it nev
 uv run --no-project --with numpy python -m unittest test_rules test_app test_ai -v
 ```
 
-`test_rules` checks the cleanup rules: fillers, stutters, lists and the dictionary. `test_app` checks the shortcut handling, settings, history, pill placement and the clipboard. `test_ai` checks what reaches the language model and the fallbacks when it is missing, with the model mocked. All three run in a second.
+`test_rules` checks the cleanup rules: fillers, stutters, spoken punctuation, self-corrections, lists and the dictionary. `test_app` checks the shortcut handling, settings, history, pill placement, the clipboard and phrase-by-phrase transcription. `test_ai` checks what reaches the language model and the fallbacks when it is missing, with the model mocked. All three run in a few seconds, on Windows or (with the Windows calls stubbed) on a Mac.
+
+The log in `%APPDATA%\Saydown\saydown.log` has a `dictation timing:` line per dictation, with the seconds spent on speech, cleanup and the paste, measured from the key release.
 
 ```
 uv run bench.py
@@ -133,7 +135,7 @@ This is an end-to-end run on your PC. It starts Saydown, presses right Alt in a 
 - Only text is put back on the clipboard after a paste. An image or files you had copied are replaced by the dictation.
 - Windows does not let an ordinary app type into a program running as administrator. Dictation into one does nothing; the text is still in history with a Copy button.
 - A microphone plugged in after launch appears in Settings, and is used as the new default, only after a restart (or once the old one stops working).
-- Text appears when you release the key, not as you speak.
+- Text appears when you release the key, not as you speak. Long dictations are transcribed phrase by phrase while you talk, so the wait after release is about the same for a minute of speech as for a sentence.
 - Without an NVIDIA graphics card, Whisper runs on the processor and takes a few seconds per dictation.
 
 ## On a Mac?

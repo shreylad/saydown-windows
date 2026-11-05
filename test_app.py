@@ -2,9 +2,14 @@
 
 Run:  uv run --no-project --with numpy python -m unittest test_app -v
 """
-import datetime, json, os, tempfile, unittest
+import datetime, json, os, tempfile, time, types, unittest
 from unittest.mock import Mock, patch
 
+import ctypes, sys
+
+if sys.platform != "win32":  # the pure-Python parts are tested on a Mac too; the real calls run on Windows (CI)
+    from unittest.mock import MagicMock
+    ctypes.WinDLL, ctypes.WINFUNCTYPE = lambda *a, **k: MagicMock(), ctypes.CFUNCTYPE
 os.environ["SAYDOWN_DATA"] = tempfile.mkdtemp(prefix="saydown-test-")  # never touch the real settings or history
 import saydown as a
 
@@ -154,6 +159,7 @@ class App(unittest.TestCase):
         self.assertEqual(a.pill_origin("left", area, (170, 28)), (24, 366))
         self.assertEqual(a.pill_origin("right", area, (170, 28)), (806, 366))
 
+    @unittest.skipUnless(sys.platform == "win32", "the real clipboard")
     def test_clipboard_round_trip_keeps_unicode_and_line_breaks(self):
         before = a.get_clipboard()
         try:
@@ -187,3 +193,89 @@ class App(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def speech(*parts):
+    """Synthetic audio: (seconds, loud) parts, loud ones as noise at speaking level, the rest near silence."""
+    rng = a.np.random.default_rng(0)
+    return a.np.concatenate([rng.normal(0, 0.2 if loud else 0.002, int(s * a.RATE)).astype(a.np.float32)
+                             for s, loud in parts])
+
+
+class Tape:
+    """A Recorder stand-in whose whole recording is there from the start."""
+
+    def __init__(self, audio):
+        self.audio = audio
+
+    def so_far(self):
+        return self.audio
+
+
+class PhrasesWhileRecording(unittest.TestCase):
+    def test_pause_at_cuts_only_in_a_real_pause_after_a_full_phrase(self):
+        rate = a.RATE
+        self.assertIsNone(a.pause_at(speech((3, True), (0.5, False), (2, True)), 0))  # pause too early
+        self.assertIsNone(a.pause_at(speech((8, True)), 0))  # no pause yet
+        self.assertIsNone(a.pause_at(speech((6, True), (0.1, False), (2, True)), 0))  # a breath, not a pause
+        cut = a.pause_at(speech((6, True), (0.6, False), (2, True)), 0)
+        self.assertTrue(6 * rate <= cut <= 6.6 * rate, cut / rate)
+        audio = speech((6, True), (0.6, False), (6, True), (0.6, False), (1, True))
+        second = a.pause_at(audio, cut)
+        self.assertTrue(12.6 * rate <= second <= 13.2 * rate, second / rate)
+
+    def wait_for(self, condition):
+        deadline = time.time() + 5
+        while not condition() and time.time() < deadline:
+            time.sleep(0.05)
+
+    def test_phrases_are_transcribed_while_recording_and_joined_at_the_end(self):
+        audio = speech((6, True), (0.6, False), (6, True), (0.6, False), (2, True))
+        heard = []
+        hear = lambda model, clip, language: heard.append(len(clip)) or (f"part{len(heard)}", [])
+        with patch.object(a, "transcribe", side_effect=hear) as transcribe:
+            phrases = a.Phrases(Tape(audio), "the model", "en")
+            self.wait_for(lambda: len(heard) >= 2)
+            self.assertEqual(len(heard), 2)  # both pauses were used before the key went up
+            phrases.ended(audio)
+            self.assertEqual(phrases.finish(phrases.end()), "part1 part2 part3")
+        self.assertEqual(sum(heard), len(audio))  # every sample transcribed once
+        self.assertEqual(transcribe.call_args.args[0], "the model")
+        self.assertEqual(transcribe.call_args.args[2], "en")
+
+    def test_finish_joins_phrases_without_the_stop_at_the_cut(self):
+        audio = speech((6, True), (0.6, False), (2, True))
+        texts = iter(["the quiet mistake.", "that I would like to stop."])
+        with patch.object(a, "transcribe", side_effect=lambda *_: (next(texts), [])):
+            phrases = a.Phrases(Tape(audio), None, None)
+            self.wait_for(lambda: phrases.done)
+            phrases.ended(audio)
+            self.assertEqual(phrases.finish(phrases.end()), "the quiet mistake that I would like to stop.")
+
+    def test_phrases_fall_back_to_the_whole_recording(self):
+        audio = speech((6, True), (0.6, False), (2, True))
+        with patch.object(a, "transcribe", side_effect=[RuntimeError("model gone"), ("everything", [])]) as transcribe:
+            phrases = a.Phrases(Tape(audio), None, "en")
+            phrases.thread.join(5)  # the failure ends the watcher
+            self.assertTrue(phrases.failed)
+            phrases.ended(audio)
+            self.assertEqual(phrases.finish(phrases.end()), "everything")
+        self.assertEqual(len(transcribe.call_args.args[1]), len(audio))
+
+    def test_silent_phrases_and_silence_are_dropped(self):
+        silent = [types.SimpleNamespace(no_speech_prob=0.9)]  # Whisper's "you" for a phrase with nobody speaking
+        audio = speech((6, True), (0.6, False), (2, True))
+        with patch.object(a, "transcribe", side_effect=[("you", silent), ("real words.", [])]) as transcribe:
+            phrases = a.Phrases(Tape(audio), None, "en")
+            self.wait_for(lambda: phrases.done)
+            phrases.ended(audio)
+            self.assertEqual(phrases.finish(phrases.end()), "real words.")
+        self.assertEqual(transcribe.call_count, 2)
+        self.assertEqual(len(transcribe.call_args.args[1]), len(audio) - phrases.done)  # only the tail, once
+        audio = speech((6, True), (0.6, False), (6, False))  # the speaker stopped but kept the key down
+        with patch.object(a, "transcribe", return_value=("words.", [])) as transcribe:
+            phrases = a.Phrases(Tape(audio), None, "en")
+            self.wait_for(lambda: phrases.done)
+            phrases.ended(audio)
+            self.assertEqual(phrases.finish(phrases.end()), "words.")
+        transcribe.assert_called_once()  # the silent tail never reached Whisper
