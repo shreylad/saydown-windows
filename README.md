@@ -8,6 +8,18 @@ Hold a key, talk, release. Cleaned-up text is pasted at your cursor, in any app.
 
 A private dictation app for Windows. Your speech is transcribed by Whisper and tidied by a small language model (Google's Gemma 4 E4B), both running on your PC: on your NVIDIA graphics card when you have one, otherwise on the processor. No recording ever leaves your computer, and there is no account or subscription.
 
+## Stack
+
+| Layer | What |
+|---|---|
+| Language | Python 3.10+, run with [uv](https://docs.astral.sh/uv/); dependencies are declared inline at the top of `saydown.py` |
+| Speech to text | [faster-whisper](https://github.com/SYSTRAN/faster-whisper) (CTranslate2) running Whisper Large V3 Turbo on CUDA, or on the CPU without an NVIDIA card |
+| Text cleanup, Rewrite, Ask | Gemma 4 E4B through [llama-cpp-python](https://github.com/abetlen/llama-cpp-python), with a small embedding model for search by meaning |
+| Hotkey and paste | A low-level keyboard hook (`SetWindowsHookEx`) and the clipboard, through `ctypes` |
+| Pill and window | A borderless Tk window for the pill; `ui.html` shown by Edge as an app window, talking to Python over a localhost-only server |
+| Packaging | Inno Setup script in `installer/`, built by GitHub Actions into `Saydown-Setup.exe` |
+| Tests | `unittest` for rules, app and AI prompts; `test_e2e.py` drives a real window with synthetic speech |
+
 ## What it does
 
 - **Push to talk.** Hold the right Alt key, speak, release. (Right Ctrl on keyboards that use right Alt as AltGr; see [Usage](#usage).)
@@ -92,6 +104,20 @@ Pasting goes through the clipboard. Text you had copied is put back right afterw
 | Text model | `TEXT_MODEL` at the top of `ai.py` | Gemma 4 E4B, Google's 4-bit QAT build |
 
 On a laptop with an RTX 2070 Max-Q (8 GB), `bench.py` scores the text model at 44/44. It checks cleanup, rewriting, editing, voice commands and Ask. Typical times are 0.23 s for a cleanup, 0.05 s for a voice-command check and 0.5 s for a rewrite. Score another model with `bench.py` before changing `TEXT_MODEL`.
+
+## Project layout
+
+| File | Role |
+|---|---|
+| `saydown.py` | The app: hotkey, recording, transcription, pill, settings, history, and the localhost server behind the window |
+| `textrules.py` | Rule-based cleanup: fillers, stutters, spoken lists, dictionary spellings |
+| `ai.py` | The text model: loading, prompts for cleanup, Rewrite, Ask and voice commands, search by meaning |
+| `ui.html` | The window: history, Ask, dictionary, styles, settings |
+| `test_rules.py`, `test_app.py`, `test_ai.py` | Unit tests, all mocked, run in about a second |
+| `test_e2e.py`, `make_test_audio.ps1` | End-to-end test on a real Windows session with synthetic speech |
+| `bench.py` | Scores a text model on real dictations before you change `TEXT_MODEL` |
+| `install.ps1`, `start.bat`, `Saydown.vbs` | Run from source: Start menu shortcut, terminal start, and the silent launcher the shortcut points at |
+| `installer/`, `.github/workflows/release.yml`, `make_icon.py`, `assets/` | Building the one-click installer and its icon |
 
 ## How it works
 
